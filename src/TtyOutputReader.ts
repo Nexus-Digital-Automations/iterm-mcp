@@ -4,8 +4,8 @@ import { promisify } from 'node:util';
 const execPromise = promisify(exec);
 
 export default class TtyOutputReader {
-  static async call(linesOfOutput?: number) {
-    const buffer = await this.retrieveBuffer();
+  static async call(windowId: string, linesOfOutput?: number, tabIndex?: number) {
+    const buffer = await this.retrieveBuffer(windowId, linesOfOutput, tabIndex);
     if (!linesOfOutput) {
       return buffer;
     }
@@ -13,18 +13,12 @@ export default class TtyOutputReader {
     return lines.slice(-linesOfOutput - 1).join('\n');
   }
 
-  static async retrieveBuffer(): Promise<string> {
-    const ascript = `
-      tell application "iTerm2"
-        tell front window
-          tell current session of current tab
-            set numRows to number of rows
-            set allContent to contents
-            return allContent
-          end tell
-        end tell
-      end tell
-    `;
+  static async retrieveBuffer(windowId: string, linesOfOutput?: number, tabIndex?: number): Promise<string> {
+    const sessionTarget = tabIndex !== undefined 
+      ? `tell tab ${tabIndex + 1} to tell current session`
+      : `tell current session`;
+    
+    const ascript = `tell application "iTerm2" to tell window id "${windowId}" to ${sessionTarget} to get contents`;
     
     const { stdout: finalContent } = await execPromise(`osascript -e '${ascript}'`);
     return finalContent.trim();

@@ -1,0 +1,203 @@
+// @ts-nocheck
+import TabManager from '../../src/TabManager.js';
+
+describe('TabManager', () => {
+  let tabManager: TabManager;
+  let mockExecPromise;
+
+  beforeEach(() => {
+    mockExecPromise = jest.fn();
+    tabManager = new TabManager(mockExecPromise);
+  });
+
+  describe('createTab', () => {
+    it('should create a new tab and return its index', async () => {
+      mockExecPromise.mockResolvedValue({ stdout: '2' });
+
+      const result = await tabManager.createTab('test-window');
+
+      expect(result).toBe(2);
+      expect(mockExecPromise).toHaveBeenCalledWith(
+        expect.stringContaining('create tab with default profile')
+      );
+    });
+
+    it('should create a tab with specific profile', async () => {
+      mockExecPromise.mockResolvedValue({ stdout: '1' });
+
+      const result = await tabManager.createTab('test-window', 'MyProfile');
+
+      expect(result).toBe(1);
+      expect(mockExecPromise).toHaveBeenCalledWith(
+        expect.stringContaining('create tab with profile "MyProfile"')
+      );
+    });
+
+    it('should create a named tab', async () => {
+      mockExecPromise.mockResolvedValue({ stdout: '0' });
+
+      const result = await tabManager.createTab('test-window', undefined, 'MyTab');
+
+      expect(result).toBe(0);
+      expect(mockExecPromise).toHaveBeenCalledWith(
+        expect.stringContaining('set name to "MyTab"')
+      );
+    });
+
+    it('should handle creation failure', async () => {
+      mockExecPromise.mockRejectedValue(new Error('iTerm error'));
+
+      await expect(tabManager.createTab('test-window')).rejects.toThrow('Failed to create tab');
+    });
+  });
+
+  describe('selectTab', () => {
+    it('should select the specified tab', async () => {
+      mockExecPromise.mockResolvedValue({ stdout: '' });
+
+      await tabManager.selectTab('test-window', 1);
+
+      expect(mockExecPromise).toHaveBeenCalledWith(
+        expect.stringContaining('tell tab 2 to select')
+      );
+    });
+
+    it('should handle selection failure', async () => {
+      mockExecPromise.mockRejectedValue(new Error('iTerm error'));
+
+      await expect(tabManager.selectTab('test-window', 1)).rejects.toThrow('Failed to select tab');
+    });
+  });
+
+  describe('listTabs', () => {
+    it('should return list of tabs with their information', async () => {
+      mockExecPromise.mockResolvedValue({ 
+        stdout: '0|Tab 1|session1|/dev/ttys001, 1|Tab 2|session2|/dev/ttys002' 
+      });
+
+      const result = await tabManager.listTabs('test-window');
+
+      expect(result).toEqual([
+        { index: 0, name: 'Tab 1', sessionId: 'session1', tty: '/dev/ttys001' },
+        { index: 1, name: 'Tab 2', sessionId: 'session2', tty: '/dev/ttys002' }
+      ]);
+    });
+
+    it('should return empty array when no tabs exist', async () => {
+      mockExecPromise.mockResolvedValue({ stdout: '' });
+
+      const result = await tabManager.listTabs('test-window');
+
+      expect(result).toEqual([]);
+    });
+
+    it('should handle listing failure', async () => {
+      mockExecPromise.mockRejectedValue(new Error('iTerm error'));
+
+      await expect(tabManager.listTabs('test-window')).rejects.toThrow('Failed to list tabs');
+    });
+  });
+
+  describe('getTabIndex', () => {
+    beforeEach(() => {
+      mockExecPromise.mockResolvedValue({ 
+        stdout: '0|Tab 1|session1|/dev/ttys001, 1|Development|session2|/dev/ttys002' 
+      });
+    });
+
+    it('should find tab by name', async () => {
+      const result = await tabManager.getTabIndex('test-window', 'Development');
+      expect(result).toBe(1);
+    });
+
+    it('should return null for non-existent tab', async () => {
+      const result = await tabManager.getTabIndex('test-window', 'NonExistent');
+      expect(result).toBeNull();
+    });
+  });
+
+  describe('closeTab', () => {
+    it('should close the specified tab', async () => {
+      mockExecPromise.mockResolvedValue({ stdout: '' });
+
+      await tabManager.closeTab('test-window', 1);
+
+      expect(mockExecPromise).toHaveBeenCalledWith(
+        expect.stringContaining('close tab 2')
+      );
+    });
+
+    it('should handle close failure', async () => {
+      mockExecPromise.mockRejectedValue(new Error('iTerm error'));
+
+      await expect(tabManager.closeTab('test-window', 1)).rejects.toThrow('Failed to close tab');
+    });
+  });
+
+  describe('getTabTty', () => {
+    it('should return TTY path for specified tab', async () => {
+      mockExecPromise.mockResolvedValue({ stdout: '/dev/ttys001' });
+
+      const result = await tabManager.getTabTty('test-window', 0);
+
+      expect(result).toBe('/dev/ttys001');
+      expect(mockExecPromise).toHaveBeenCalledWith(
+        expect.stringContaining('tell tab 1 to tell current session to get tty')
+      );
+    });
+
+    it('should handle TTY retrieval failure', async () => {
+      mockExecPromise.mockRejectedValue(new Error('iTerm error'));
+
+      await expect(tabManager.getTabTty('test-window', 0)).rejects.toThrow('Failed to get TTY for tab');
+    });
+  });
+
+  describe('resolveTabIndex', () => {
+    beforeEach(() => {
+      mockExecPromise.mockResolvedValue({ 
+        stdout: '0|Tab 1|session1|/dev/ttys001, 1|Development|session2|/dev/ttys002' 
+      });
+    });
+
+    it('should return numeric index as-is', async () => {
+      const result = await tabManager.resolveTabIndex('test-window', 5);
+      expect(result).toBe(5);
+    });
+
+    it('should parse numeric string', async () => {
+      const result = await tabManager.resolveTabIndex('test-window', '3');
+      expect(result).toBe(3);
+    });
+
+    it('should resolve tab name to index', async () => {
+      const result = await tabManager.resolveTabIndex('test-window', 'Development');
+      expect(result).toBe(1);
+    });
+
+    it('should throw error for non-existent tab name', async () => {
+      await expect(tabManager.resolveTabIndex('test-window', 'NonExistent'))
+        .rejects.toThrow('Tab "NonExistent" not found');
+    });
+  });
+
+  describe('ensureTab', () => {
+    it('should return existing tab index if tab exists', async () => {
+      mockExecPromise.mockResolvedValue({ 
+        stdout: '0|Tab 1|session1|/dev/ttys001, 1|Development|session2|/dev/ttys002' 
+      });
+
+      const result = await tabManager.ensureTab('test-window', 'Development');
+      expect(result).toBe(1);
+    });
+
+    it('should create new tab if it does not exist', async () => {
+      mockExecPromise
+        .mockResolvedValueOnce({ stdout: '0|Tab 1|session1|/dev/ttys001' }) // listTabs call
+        .mockResolvedValueOnce({ stdout: '1' }); // createTab call
+
+      const result = await tabManager.ensureTab('test-window', 'NewTab');
+      expect(result).toBe(1);
+    });
+  });
+});

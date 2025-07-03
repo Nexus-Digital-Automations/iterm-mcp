@@ -5,11 +5,11 @@ const execPromise = promisify(exec);
 
 class SendControlCharacter {
   // This method is added for testing purposes
-  protected async executeCommand(command: string): Promise<void> {
+  protected async executeCommand(command: string, windowId: string): Promise<void> {
     await execPromise(command);
   }
 
-  async send(letter: string): Promise<void> {
+  async send(windowId: string, letter: string): Promise<void> {
     let controlCode: number;
     
     // Handle special cases for telnet escape sequences
@@ -36,8 +36,8 @@ class SendControlCharacter {
     // AppleScript to send the control character
     const ascript = `
       tell application "iTerm2"
-        tell front window
-          tell current session of current tab
+        tell window id ${windowId}
+          tell current session
             -- Send the control character
             write text (ASCII character ${controlCode})
           end tell
@@ -46,7 +46,7 @@ class SendControlCharacter {
     `;
 
     try {
-      await this.executeCommand(`osascript -e '${ascript}'`);
+      await this.executeCommand(`osascript -e '${ascript}'`, windowId);
     } catch (error: unknown) {
       throw new Error(`Failed to send control character: ${(error as Error).message}`);
     }

@@ -24,50 +24,137 @@ class CommandExecutor {
   }
 
   /**
+   * Wraps a promise with a timeout
+   * @param promise The promise to wrap
+   * @param timeoutMs Timeout in milliseconds
+   * @param errorMessage Error message for timeout
+   * @returns Promise that rejects on timeout or resolves with the original promise
+   */
+  private async withTimeout<T>(
+    promise: Promise<T>, 
+    timeoutMs: number, 
+    errorMessage: string
+  ): Promise<T> {
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error(errorMessage)), timeoutMs);
+    });
+
+    return Promise.race([promise, timeoutPromise]);
+  }
+
+  /**
    * Executes a command in the iTerm2 terminal.
    * 
    * This method handles both single-line and multiline commands by:
    * 1. Properly escaping the command string for AppleScript
    * 2. Using different AppleScript approaches based on whether the command contains newlines
-   * 3. Waiting for the command to complete execution
+   * 3. Waiting for the command to complete execution with optional timeout
    * 4. Retrieving the terminal output after command execution
    * 
+   * @param windowId The iTerm2 window ID to target
    * @param command The command to execute (can contain newlines)
-   * @returns A promise that resolves to the terminal output after command execution
+   * @param timeoutSeconds Maximum time to wait for command completion (default: 30)
+   * @param returnOutputLines Number of lines to return from terminal output (default: 0, disabled)
+   * @param tabIndex Optional tab index to target (0-based, defaults to current session)
+   * @returns A promise that resolves to execution metadata and optionally terminal output
    */
-  async executeCommand(command: string): Promise<string> {
+  async executeCommand(windowId: string, command: string, timeoutSeconds = 30, returnOutputLines = 0, tabIndex?: number): Promise<{newLines: number, executionTime: number, output?: string | null}> {
     const escapedCommand = this.escapeForAppleScript(command);
+    const startTime = Date.now();
+    const timeoutMs = timeoutSeconds * 1000;
     
     try {
+      // Get buffer state before command execution to calculate new lines
+      const beforeCommandBuffer = await TtyOutputReader.retrieveBuffer(windowId, undefined, tabIndex);
+      const beforeCommandBufferLines = beforeCommandBuffer.split("\n").length;
+      
+      // Build the session target based on whether we're targeting a specific tab
+      const sessionTarget = tabIndex !== undefined 
+        ? `tell tab ${tabIndex + 1} to tell current session`
+        : `tell current session`;
+      
       // Check if this is a multiline command (which would have been processed differently)
       if (command.includes('\n')) {
         // For multiline text, we use parentheses around our prepared string expression
         // This allows AppleScript to evaluate the string concatenation expression
-        await this._execPromise(`/usr/bin/osascript -e 'tell application "iTerm2" to tell current session of current window to write text (${escapedCommand})'`);
+        await this._execPromise(`/usr/bin/osascript -e 'tell application "iTerm2" to tell window id "${windowId}" to ${sessionTarget} to write text (${escapedCommand}) newline YES'`);
       } else {
         // For single line commands, we can use the standard approach with quoted strings
-        await this._execPromise(`/usr/bin/osascript -e 'tell application "iTerm2" to tell current session of current window to write text "${escapedCommand}"'`);
+        await this._execPromise(`/usr/bin/osascript -e 'tell application "iTerm2" to tell window id "${windowId}" to ${sessionTarget} to write text "${escapedCommand}" newline YES'`);
       }
       
-      // Wait until iTerm2 reports that command processing is complete
-      while (await this.isProcessing()) {
-        await sleep(100);
-      }
+      // Phase 1: Wait for processing to complete (25% of timeout)
+      const processingTimeout = timeoutMs * 0.25;
+      await this.withTimeout(
+        this.waitForProcessingComplete(windowId, tabIndex),
+        processingTimeout,
+        `Command timed out waiting for processing to complete (${processingTimeout/1000}s)`
+      );
       
-      // Get the TTY path and check if it's waiting for user input
-      const ttyPath = await this.retrieveTtyPath();
-      while (await this.isWaitingForUserInput(ttyPath) === false) {
-        await sleep(100);
-      }
+      // Phase 2: Wait for user input ready (70% of remaining timeout)
+      const elapsedTime = Date.now() - startTime;
+      const remainingTime = Math.max(timeoutMs - elapsedTime, 1000); // At least 1 second
+      const inputTimeout = Math.min(remainingTime * 0.93, timeoutMs * 0.7);
+      
+      const ttyPath = await this.retrieveTtyPath(windowId, tabIndex);
+      await this.withTimeout(
+        this.waitForUserInputReady(windowId, ttyPath),
+        inputTimeout,
+        `Command timed out waiting for completion (${timeoutSeconds}s total timeout exceeded)`
+      );
 
-      // Give a small delay for output to settle
+      // Phase 3: Give a small delay for output to settle
       await sleep(200);
       
-      // Retrieve the terminal output after command execution
-      const afterCommandBuffer = await TtyOutputReader.retrieveBuffer()
-      return afterCommandBuffer
+      // Get buffer state after command execution
+      const afterCommandBuffer = await TtyOutputReader.retrieveBuffer(windowId, undefined, tabIndex);
+      const afterCommandBufferLines = afterCommandBuffer.split("\n").length;
+      const newLines = afterCommandBufferLines - beforeCommandBufferLines;
+      
+      const executionTime = Date.now() - startTime;
+      
+      // Capture output lines if requested
+      let output: string | null | undefined;
+      if (returnOutputLines > 0) {
+        try {
+          const lines = afterCommandBuffer.split('\n');
+          output = lines.slice(-returnOutputLines - 1).join('\n');
+        } catch (error: unknown) {
+          // If output reading fails, log warning but don't fail the entire command
+          console.warn(`Failed to capture output lines: ${(error as Error).message}`);
+          output = null;
+        }
+      }
+      
+      return {
+        newLines,
+        executionTime,
+        ...(output !== undefined && { output })
+      };
     } catch (error: unknown) {
       throw new Error(`Failed to execute command: ${(error as Error).message}`);
+    }
+  }
+
+  /**
+   * Wait for iTerm2 processing to complete
+   * @param windowId The iTerm2 window ID
+   * @param tabIndex Optional tab index to target
+   */
+  private async waitForProcessingComplete(windowId: string, tabIndex?: number): Promise<void> {
+    while (await this.isProcessing(windowId, tabIndex)) {
+      await sleep(100);
+    }
+  }
+
+  /**
+   * Wait for user input to be ready (command completion)
+   * @param windowId The iTerm2 window ID
+   * @param ttyPath TTY path for the session
+   */
+  private async waitForUserInputReady(windowId: string, ttyPath: string): Promise<void> {
+    while (await this.isWaitingForUserInput(ttyPath) === false) {
+      await sleep(100);
     }
   }
 
@@ -192,21 +279,41 @@ class CommandExecutor {
       .replace(/\t/g, '\\t');  // Handle tabs
   }
 
-  private async retrieveTtyPath(): Promise<string> {
+  private async retrieveTtyPath(windowId: string, tabIndex?: number): Promise<string> {
     try {
-      const { stdout } = await this._execPromise(`/usr/bin/osascript -e 'tell application "iTerm2" to tell current session of current window to get tty'`);
+      const sessionTarget = tabIndex !== undefined 
+        ? `tell tab ${tabIndex + 1} to tell current session`
+        : `tell current session`;
+      
+      const { stdout } = await this._execPromise(`/usr/bin/osascript -e 'tell application "iTerm2" to tell window id "${windowId}" to ${sessionTarget} to get tty'`);
       return stdout.trim();
     } catch (error: unknown) {
-      throw new Error(`Failed to retrieve TTY path: ${(error as Error).message}`);
+      const errorMessage = (error as Error).message;
+      if (errorMessage.includes('Invalid key form') || errorMessage.includes('doesn\'t understand')) {
+        throw new Error(`Invalid window ID ${windowId}: window may have been closed or doesn't exist`);
+      } else if (errorMessage.includes('iTerm2 got an error')) {
+        throw new Error(`iTerm2 AppleScript error: ${errorMessage}`);
+      }
+      throw new Error(`Failed to retrieve TTY path: ${errorMessage}`);
     }
   }
 
-  private async isProcessing(): Promise<boolean> {
+  private async isProcessing(windowId: string, tabIndex?: number): Promise<boolean> {
     try {
-      const { stdout } = await this._execPromise(`/usr/bin/osascript -e 'tell application "iTerm2" to tell current session of current window to get is processing'`);
+      const sessionTarget = tabIndex !== undefined 
+        ? `tell tab ${tabIndex + 1} to tell current session`
+        : `tell current session`;
+      
+      const { stdout } = await this._execPromise(`/usr/bin/osascript -e 'tell application "iTerm2" to tell window id "${windowId}" to ${sessionTarget} to get is processing'`);
       return stdout.trim() === 'true';
     } catch (error: unknown) {
-      throw new Error(`Failed to check processing status: ${(error as Error).message}`);
+      const errorMessage = (error as Error).message;
+      if (errorMessage.includes('Invalid key form') || errorMessage.includes('doesn\'t understand')) {
+        throw new Error(`Invalid window ID ${windowId}: window may have been closed or doesn't exist`);
+      } else if (errorMessage.includes('iTerm2 got an error')) {
+        throw new Error(`iTerm2 AppleScript error: ${errorMessage}`);
+      }
+      throw new Error(`Failed to check processing status: ${errorMessage}`);
     }
   }
 }
